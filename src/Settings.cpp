@@ -436,6 +436,10 @@ QVariant Settings::getDefaultValue(const std::string& group, const std::string& 
         // QCPScatterStyle::ssDisk
         if(name == "pointShape")
             return 4;
+
+        // QCPColorGradient::gpThermal (index in the comboColorGradient list)
+        if(name == "colorGradient")
+            return 7;
     }
 
 

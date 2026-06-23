@@ -3,15 +3,22 @@
 
 #include "Palette.h"
 
+#include <QColor>
 #include <QDialog>
+#include <QString>
 #include <QVariant>
+#include <QVector>
 
+#include <map>
 #include <vector>
 
 class QMenu;
 class QPrinter;
 class QTreeWidgetItem;
 class QCPAxis;
+class QCPColorScale;
+class QCPMarginGroup;
+class QCPRange;
 class QMouseEvent;
 
 class SqliteTableModel;
@@ -87,7 +94,8 @@ private:
         PlotColumnX = 1,
         PlotColumnY1 = 2,
         PlotColumnY2 = 3,
-        PlotColumnType = 4,
+        PlotColumnColour = 4,
+        PlotColumnType = 5,
     };
 
     Ui::PlotDock* ui;
@@ -102,6 +110,8 @@ private:
     std::vector<QCPAxis *> yAxes;
     std::vector<int> PlotColumnY;
     unsigned int m_xtype;
+    QCPColorScale* m_colorScale;
+    QCPMarginGroup* m_colorScaleMarginGroup;
 
     /*!
      * \brief guessdatatype try to parse the first 10 rows and decide the datatype
@@ -113,12 +123,54 @@ private:
     void adjustBars();
     void adjustAxisFormat();
 
+    /*!
+     * \brief Find the tree item whose given check column is checked, if any.
+     * \param column one of the PlotColumns check columns (e.g. PlotColumnX, PlotColumnColour)
+     * \return the checked item or nullptr when none is checked
+     */
+    QTreeWidgetItem* checkedItem(int column) const;
+
+    /*!
+     * \brief Draw the colour-scaled scatter points for a single y-series on top of its plottable.
+     *
+     * The points are coloured according to the value of the selected colour column, mapped through
+     * the currently selected gradient. The overlay is purely visual and not selectable, so the
+     * existing point/row selection mechanism on the underlying plottable keeps working.
+     * \param valueAxis the y axis the series is attached to
+     * \param xdata the already computed x coordinates of the series
+     * \param ydata the y coordinates of the series
+     * \param colorData the value of the colour column for each point
+     * \param range the value range used to map colours
+     * \param shape the scatter shape to use for the points
+     */
+    void drawColorScaledPoints(QCPAxis* valueAxis, const QVector<double>& xdata, const QVector<double>& ydata,
+                               const QVector<double>& colorData, const QCPRange& range, int shape);
+
+    /*!
+     * \brief Draw categorically-coloured scatter points for a single y-series on top of its plottable.
+     *
+     * Used when the colour column is a label column: every distinct label gets its own colour and,
+     * optionally, a legend entry. Like \ref drawColorScaledPoints the overlay is purely decorative
+     * and not selectable.
+     * \param valueAxis the y axis the series is attached to
+     * \param xdata the already computed x coordinates of the series
+     * \param ydata the y coordinates of the series
+     * \param rowLabels the label of the colour column for each point (null string for NULL cells)
+     * \param labelColors mapping of each distinct label to its colour
+     * \param shape the scatter shape to use for the points
+     * \param addToLegend whether the created overlay graphs should appear in the legend
+     */
+    void drawCategoricalPoints(QCPAxis* valueAxis, const QVector<double>& xdata, const QVector<double>& ydata,
+                               const QVector<QString>& rowLabels, const std::map<QString, QColor>& labelColors,
+                               int shape, bool addToLegend);
+
 private slots:
     void columnItemChanged(QTreeWidgetItem* item, int column);
     void columnItemDoubleClicked(QTreeWidgetItem* item, int column);
     void savePlot();
     void lineTypeChanged(int index);
     void pointShapeChanged(int index);
+    void colorGradientChanged(int index);
     void selectionChanged();
     void mousePress();
     void mouseWheel();

@@ -26,6 +26,10 @@
 #include <QMouseEvent>
 #include <QLocale>
 
+#include <algorithm>
+#include <map>
+#include <set>
+
 static int random_number(int from, int to)
 {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 10, 0)
@@ -33,6 +37,20 @@ static int random_number(int from, int to)
 #else
     return qrand() % to + from;
 #endif
+}
+
+// The items of the comboColorGradient combo box are kept in the very same order as the
+// QCPColorGradient::GradientPreset enum, so the combo index can be used as the preset directly.
+static QCPColorGradient gradientFromIndex(int index)
+{
+    if(index < 0 || index > QCPColorGradient::gpHues)
+        index = QCPColorGradient::gpThermal;
+
+    QCPColorGradient gradient(static_cast<QCPColorGradient::GradientPreset>(index));
+    // Points whose colour-column value is NULL are not part of the overlay (the series base colour
+    // shows through for them), but make any stray NaN transparent just to be safe.
+    gradient.setNanHandling(QCPColorGradient::nhTransparent);
+    return gradient;
 }
 
 PlotDock::PlotDock(QWidget* parent)
@@ -43,7 +61,9 @@ PlotDock::PlotDock(QWidget* parent)
       m_showLegend(false),
       m_stackedBars(false),
       m_fixedFormat(false),
-      m_xtype(QVariant::Invalid)
+      m_xtype(QVariant::Invalid),
+      m_colorScale(nullptr),
+      m_colorScaleMarginGroup(nullptr)
 {
     ui->setupUi(this);
 
@@ -54,6 +74,11 @@ PlotDock::PlotDock(QWidget* parent)
     ui->splitterForPlot->restoreState(Settings::getValue("PlotDock", "splitterSize").toByteArray());
     ui->comboLineType->setCurrentIndex(Settings::getValue("PlotDock", "lineType").toInt());
     ui->comboPointShape->setCurrentIndex(Settings::getValue("PlotDock", "pointShape").toInt());
+    // Restore the gradient without emitting currentIndexChanged: the slot would call updatePlot()
+    // before yAxes is initialised at the end of this constructor, which would crash.
+    ui->comboColorGradient->blockSignals(true);
+    ui->comboColorGradient->setCurrentIndex(Settings::getValue("PlotDock", "colorGradient").toInt());
+    ui->comboColorGradient->blockSignals(false);
 
     // Connect signals
     connect(ui->plotWidget, &QCustomPlot::selectionChangedByUser, this, &PlotDock::selectionChanged);
@@ -140,6 +165,7 @@ PlotDock::~PlotDock()
     Settings::setValue("PlotDock", "splitterSize", ui->splitterForPlot->saveState());
     Settings::setValue("PlotDock", "lineType", ui->comboLineType->currentIndex());
     Settings::setValue("PlotDock", "pointShape", ui->comboPointShape->currentIndex());
+    Settings::setValue("PlotDock", "colorGradient", ui->comboColorGradient->currentIndex());
 
     // Finally, delete all widgets
     delete ui;
@@ -164,6 +190,7 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
 
         // save current selected columns, so we can restore them after the update
         QString sItemX; // selected X column
+        QString sItemColor; // selected colour-scale column
         std::vector<std::map<QString, PlotSettings>> mapItemsY = {std::map<QString, PlotSettings>(), std::map<QString, PlotSettings>()};
 
         if(keepOrResetSelection)
@@ -174,6 +201,8 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                 QTreeWidgetItem* item = ui->treePlotColumns->topLevelItem(i);
                 if(item->checkState(PlotColumnX) == Qt::Checked)
                     sItemX = item->text(PlotColumnField);
+                if(item->checkState(PlotColumnColour) == Qt::Checked)
+                    sItemColor = item->text(PlotColumnField);
 
                 for(size_t y_ind = 0; y_ind < 2; y_ind++)
                   if(item->checkState(PlotColumnY[y_ind]) == Qt::Checked)
@@ -185,8 +214,17 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
         } else {
             // Get the plot columns to select from the stored browse table information
             sItemX = m_currentTableSettings->plotXAxis;
+            sItemColor = m_currentTableSettings->plotColorColumn;
             mapItemsY[0] = m_currentTableSettings->plotYAxes[0];
             mapItemsY[1] = m_currentTableSettings->plotYAxes[1];
+
+            // Also restore the stored gradient for this table, if any
+            if(m_currentTableSettings->plotColorGradient >= 0)
+            {
+                ui->comboColorGradient->blockSignals(true);
+                ui->comboColorGradient->setCurrentIndex(m_currentTableSettings->plotColorGradient);
+                ui->comboColorGradient->blockSignals(false);
+            }
         }
 
         ui->treePlotColumns->clear();
@@ -245,6 +283,16 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                         columnitem->setCheckState(PlotColumnX, Qt::Checked);
                     else
                         columnitem->setCheckState(PlotColumnX, Qt::Unchecked);
+
+                    // Points can be coloured by a numeric column (continuous gradient) or by a
+                    // label column (one distinct colour per label)
+                    if(columntype == QVariant::Double || columntype == QVariant::String)
+                    {
+                        if(sItemColor == columnitem->text(PlotColumnField))
+                            columnitem->setCheckState(PlotColumnColour, Qt::Checked);
+                        else
+                            columnitem->setCheckState(PlotColumnColour, Qt::Unchecked);
+                    }
                 }
             }
 
@@ -278,6 +326,11 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                 else
                     columnitem->setCheckState(PlotColumnX, Qt::Unchecked);
 
+                if(sItemColor == columnitem->text(PlotColumnField))
+                    columnitem->setCheckState(PlotColumnColour, Qt::Checked);
+                else
+                    columnitem->setCheckState(PlotColumnColour, Qt::Unchecked);
+
                 ui->treePlotColumns->takeTopLevelItem(ui->treePlotColumns->indexOfTopLevelItem(columnitem));
                 ui->treePlotColumns->insertTopLevelItem(0, columnitem);
             }
@@ -301,6 +354,12 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
     }
 
     std::vector<QStringList> yAxisLabels = {QStringList(), QStringList()};
+
+    // State of the optional point colouring (set while drawing below, applied to the legend afterwards)
+    bool colorActive = false;       // a colour column is in use
+    bool categoricalColor = false;  // the colour column is a label column (one colour per label)
+    QCPRange colorRange;            // value range for the continuous (numeric) gradient
+    QString colorLabel;             // colour-bar label (the numeric column name)
 
     // Clear graphs and axis labels
     ui->plotWidget->clearPlottables();
@@ -353,6 +412,87 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
 
         // Boolean to decide whether secondary y axis should be displayed
         bool displayY2Axis = false;
+
+        // Determine whether a column was selected to colour the points. Colouring is not applied to
+        // bar charts (String X type). A numeric colour column maps every point onto a continuous
+        // gradient; a label (String) colour column gives every distinct label its own colour.
+        QTreeWidgetItem* colorItem = checkedItem(PlotColumnColour);
+        const unsigned int colorType = colorItem ? colorItem->data(PlotColumnType, Qt::UserRole).toUInt() : QVariant::Invalid;
+        colorActive = colorItem && m_xtype != QVariant::String &&
+                      (colorType == QVariant::Double || colorType == QVariant::String);
+        categoricalColor = colorActive && colorType == QVariant::String;
+
+        // Per-point data shared by all y-series. For numeric colouring we keep the value and its
+        // range; for categorical colouring we keep each row's label and the label-to-colour mapping.
+        QVector<double> colorData;
+        QVector<QString> rowLabels;
+        std::map<QString, QColor> labelColors;
+        bool categoricalLegendDone = false;
+
+        if(colorActive && !categoricalColor)
+        {
+            const int colorColumn = colorItem->data(PlotColumnField, Qt::UserRole).toInt();
+            colorLabel = (colorColumn == RowNumId) ? tr("Row #")
+                                                   : model->headerData(colorColumn, Qt::Horizontal, Qt::EditRole).toString();
+            const int nrows = model->rowCount();
+            colorData.resize(nrows);
+
+            bool first = true;
+            for(int j = 0; j < nrows; ++j)
+            {
+                QVariant v = (colorColumn == RowNumId) ? QVariant(j+1) : model->data(model->index(j, colorColumn), Qt::EditRole);
+                if(v.isNull())
+                {
+                    colorData[j] = qQNaN();
+                    continue;
+                }
+                const double d = v.toDouble();
+                colorData[j] = d;
+                if(first)
+                {
+                    colorRange.lower = colorRange.upper = d;
+                    first = false;
+                } else {
+                    colorRange.lower = std::min(colorRange.lower, d);
+                    colorRange.upper = std::max(colorRange.upper, d);
+                }
+            }
+            // Guard against a zero-width range (all values equal), which would make the gradient undefined
+            if(colorRange.lower == colorRange.upper)
+                colorRange.upper = colorRange.lower + 1.0;
+        }
+        else if(categoricalColor)
+        {
+            // Limit the number of distinct labels we colour, to keep the legend readable and the
+            // number of overlay graphs bounded. Extra labels keep the series base colour.
+            const int maxCategories = 100;
+            const int colorColumn = colorItem->data(PlotColumnField, Qt::UserRole).toInt();
+            const int nrows = model->rowCount();
+            rowLabels.resize(nrows);
+
+            std::set<QString> distinct;
+            for(int j = 0; j < nrows; ++j)
+            {
+                const QVariant v = model->data(model->index(j, colorColumn), Qt::EditRole);
+                if(v.isNull())
+                {
+                    rowLabels[j] = QString();    // null string marks "no label"
+                    continue;
+                }
+                const QString label = v.toString();
+                rowLabels[j] = label;
+                if(static_cast<int>(distinct.size()) < maxCategories)
+                    distinct.insert(label);
+            }
+
+            // Assign a colour to each label by sampling the selected gradient at evenly spaced
+            // positions, so distinct labels get distinct colours from the chosen palette.
+            QCPColorGradient gradient = gradientFromIndex(ui->comboColorGradient->currentIndex());
+            const QCPRange sampleRange(0, std::max<int>(static_cast<int>(distinct.size()), 1));
+            int idx = 0;
+            for(const QString& label : distinct)
+                labelColors[label] = QColor(gradient.color(idx++, sampleRange));
+        }
 
         // add graph for each selected y axis
         for(int i = 0; i < ui->treePlotColumns->topLevelItemCount(); ++i)
@@ -460,6 +600,10 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                 // WARN: ssDot is removed
                 int shapeIdx = ui->comboPointShape->currentIndex();
                 if (shapeIdx > 0) shapeIdx += 1;
+                // When colour-scaling the points we need a visible marker to carry the colour, so fall
+                // back to a disc when the user left the point shape on "None".
+                if (colorActive && shapeIdx == QCPScatterStyle::ssNone)
+                    shapeIdx = QCPScatterStyle::ssDisc;
                 QCPScatterStyle scatterStyle = QCPScatterStyle(static_cast<QCPScatterStyle::ScatterShape>(shapeIdx), 5);
 
                 QCPAbstractPlottable* plottable = nullptr;
@@ -521,12 +665,37 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                             }
                         }
                     }
+
+                    // Overlay coloured points on top of the just-created graphs/curves. The
+                    // underlying plottable keeps its (single colour) markers so it stays selectable,
+                    // while these opaque coloured points sit exactly on top of them.
+                    if(colorActive)
+                    {
+                        for(size_t y_ind = 0; y_ind < 2; y_ind++)
+                        {
+                            if(!yItemBool[y_ind])
+                                continue;
+                            if(categoricalColor)
+                            {
+                                // Only the first drawn series populates the legend, so each label
+                                // appears exactly once even with two y-axes.
+                                drawCategoricalPoints(yAxes[y_ind], xdata, ydata[y_ind], rowLabels, labelColors, shapeIdx, !categoricalLegendDone);
+                                categoricalLegendDone = true;
+                            } else {
+                                drawColorScaledPoints(yAxes[y_ind], xdata, ydata[y_ind], colorData, colorRange, shapeIdx);
+                            }
+                        }
+                    }
                 }
 
                 if(plottable)
                 {
                     plottable->setSelectable(QCP::stDataRange);
                     plottable->setName(item->text(PlotColumnField));
+                    // In categorical colouring the legend lists the labels, so keep the series
+                    // plottables themselves out of it to avoid clutter.
+                    if(categoricalColor)
+                        plottable->removeFromLegend();
                 }
 
                 for(size_t y_ind = 0; y_ind < 2; y_ind++)
@@ -544,7 +713,8 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
         }
 
         ui->plotWidget->rescaleAxes(true);
-        ui->plotWidget->legend->setVisible(m_showLegend);
+        // The label legend is the whole point of categorical colouring, so force it visible then.
+        ui->plotWidget->legend->setVisible(m_showLegend || categoricalColor);
         // Legend with slightly transparent background brush:
         ui->plotWidget->legend->setBrush(QColor(255, 255, 255, 150));
 
@@ -563,6 +733,31 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
           yAxes[1]->setVisible(false);
           yAxes[1]->setTickLabels(false);
         }
+    }
+
+    // The continuous colour bar is only shown for numeric colouring. Rebuild it from scratch on
+    // every update so it can never get out of sync or be left behind when colouring is switched
+    // off or changed (categorical colouring uses the normal legend instead).
+    if(m_colorScale)
+    {
+        ui->plotWidget->plotLayout()->remove(m_colorScale);   // remove() also deletes the element
+        ui->plotWidget->plotLayout()->simplify();
+        m_colorScale = nullptr;
+    }
+    if(colorActive && !categoricalColor)
+    {
+        m_colorScale = new QCPColorScale(ui->plotWidget);
+        m_colorScale->setType(QCPAxis::atRight);
+        m_colorScale->setGradient(gradientFromIndex(ui->comboColorGradient->currentIndex()));
+        m_colorScale->setDataRange(colorRange);
+        m_colorScale->axis()->setLabel(colorLabel);
+        ui->plotWidget->plotLayout()->addElement(0, 1, m_colorScale);
+
+        // Keep the colour bar vertically aligned with the main axis rect
+        if(!m_colorScaleMarginGroup)
+            m_colorScaleMarginGroup = new QCPMarginGroup(ui->plotWidget);
+        ui->plotWidget->axisRect()->setMarginGroup(QCP::msTop | QCP::msBottom, m_colorScaleMarginGroup);
+        m_colorScale->setMarginGroup(QCP::msTop | QCP::msBottom, m_colorScaleMarginGroup);
     }
 
     adjustBars();
@@ -611,6 +806,26 @@ void PlotDock::columnItemChanged(QTreeWidgetItem* changeitem, int column)
                 m_currentTableSettings->plotXAxis = changeitem->text(PlotColumnField);
             else
                 m_currentTableSettings->plotXAxis = QString();
+        }
+    } else if(column == PlotColumnColour) {
+        // make sure only 1 colour column is selected
+        for(int i = 0; i < ui->treePlotColumns->topLevelItemCount(); ++i)
+        {
+            QTreeWidgetItem* item = ui->treePlotColumns->topLevelItem(i);
+            if(item->checkState(column) == Qt::Checked && item != changeitem)
+                item->setCheckState(column, Qt::Unchecked);
+        }
+
+        // Save settings for this table
+        if(m_currentTableSettings)
+        {
+            if(changeitem->checkState(column) == Qt::Checked)
+            {
+                m_currentTableSettings->plotColorColumn = changeitem->text(PlotColumnField);
+                m_currentTableSettings->plotColorGradient = ui->comboColorGradient->currentIndex();
+            }
+            else
+                m_currentTableSettings->plotColorColumn = QString();
         }
     } else if(column == PlotColumnY[0] || column == PlotColumnY[1]) {
         // Save check state of this column
@@ -752,8 +967,10 @@ void PlotDock::lineTypeChanged(int index)
             graph->setLineStyle(lineStyle);
     }
     // We have changed the style only for graphs, but not for curves.
-    // If there are any in the plot, we have to update it completely in order to apply the new style
-    if (hasCurves)
+    // If there are any in the plot, we have to update it completely in order to apply the new style.
+    // The same is true when colour-scaling is active, since the manual loop above also touches the
+    // (line-less) coloured overlay graphs which then need to be rebuilt.
+    if (hasCurves || checkedItem(PlotColumnColour))
         updatePlot(m_currentPlotModel, m_currentTableSettings, false);
     else
         ui->plotWidget->replot();
@@ -790,8 +1007,10 @@ void PlotDock::pointShapeChanged(int index)
             graph->setScatterStyle(QCPScatterStyle(shape, 5));
     }
     // We have changed the style only for graphs, but not for curves.
-    // If there are any in the plot, we have to update it completely in order to apply the new style
-    if (hasCurves)
+    // If there are any in the plot, we have to update it completely in order to apply the new style.
+    // The same is true when colour-scaling is active, since the manual loop above strips the colour
+    // off the overlay points which then need to be rebuilt.
+    if (hasCurves || checkedItem(PlotColumnColour))
         updatePlot(m_currentPlotModel, m_currentTableSettings, false);
     else
         ui->plotWidget->replot();
@@ -809,6 +1028,108 @@ void PlotDock::pointShapeChanged(int index)
                 ++it;
             }
         }
+    }
+}
+
+void PlotDock::colorGradientChanged(int index)
+{
+    // Persist the gradient as the global default and, if a colour column is in use, for this table
+    Settings::setValue("PlotDock", "colorGradient", index);
+    if(m_currentTableSettings && checkedItem(PlotColumnColour))
+        m_currentTableSettings->plotColorGradient = index;
+
+    // Rebuild so the points and the colour-scale legend pick up the new gradient
+    updatePlot(m_currentPlotModel, m_currentTableSettings, false);
+}
+
+QTreeWidgetItem* PlotDock::checkedItem(int column) const
+{
+    for(int i = 0; i < ui->treePlotColumns->topLevelItemCount(); ++i)
+    {
+        QTreeWidgetItem* item = ui->treePlotColumns->topLevelItem(i);
+        if(item->checkState(column) == Qt::Checked)
+            return item;
+    }
+    return nullptr;
+}
+
+void PlotDock::drawColorScaledPoints(QCPAxis* valueAxis, const QVector<double>& xdata, const QVector<double>& ydata,
+                                     const QVector<double>& colorData, const QCPRange& range, int shape)
+{
+    QCPColorGradient gradient = gradientFromIndex(ui->comboColorGradient->currentIndex());
+
+    // Group the points by the exact colour the gradient maps them to. This keeps the number of
+    // overlay graphs small (at most one per distinct colour) while matching the colour-scale legend.
+    std::map<QRgb, QVector<double>> xByColor;
+    std::map<QRgb, QVector<double>> yByColor;
+
+    const int n = std::min(colorData.size(), std::min(xdata.size(), ydata.size()));
+    for(int j = 0; j < n; ++j)
+    {
+        // Points without a colour value (or without coordinates) are left to the underlying plottable
+        if(qIsNaN(colorData[j]) || qIsNaN(xdata[j]) || qIsNaN(ydata[j]))
+            continue;
+
+        const QRgb rgb = gradient.color(colorData[j], range);
+        xByColor[rgb].append(xdata[j]);
+        yByColor[rgb].append(ydata[j]);
+    }
+
+    for(const auto& entry : xByColor)
+    {
+        const QRgb rgb = entry.first;
+        const QColor color(rgb);
+
+        QCPGraph* overlay = ui->plotWidget->addGraph(ui->plotWidget->xAxis, valueAxis);
+        overlay->setData(entry.second, yByColor[rgb], /*alreadySorted*/ false);
+        overlay->setLineStyle(QCPGraph::lsNone);
+        overlay->setScatterStyle(QCPScatterStyle(static_cast<QCPScatterStyle::ScatterShape>(shape), color, color, 5));
+        overlay->setPen(QPen(color));
+        // These points are purely decorative: keep them out of the selection and the legend so the
+        // underlying plottable remains the single source of truth for point/row selection.
+        overlay->setSelectable(QCP::stNone);
+        overlay->removeFromLegend();
+    }
+}
+
+void PlotDock::drawCategoricalPoints(QCPAxis* valueAxis, const QVector<double>& xdata, const QVector<double>& ydata,
+                                     const QVector<QString>& rowLabels, const std::map<QString, QColor>& labelColors,
+                                     int shape, bool addToLegend)
+{
+    // Group the points by their label, so each distinct label becomes a single overlay graph.
+    std::map<QString, QVector<double>> xByLabel;
+    std::map<QString, QVector<double>> yByLabel;
+
+    const int n = std::min(rowLabels.size(), std::min(xdata.size(), ydata.size()));
+    for(int j = 0; j < n; ++j)
+    {
+        // Rows without a label (NULL) or coordinates are left to the underlying plottable.
+        // Labels beyond the colouring limit are not in labelColors and are skipped too.
+        if(rowLabels[j].isNull() || qIsNaN(xdata[j]) || qIsNaN(ydata[j]))
+            continue;
+        if(labelColors.find(rowLabels[j]) == labelColors.end())
+            continue;
+
+        xByLabel[rowLabels[j]].append(xdata[j]);
+        yByLabel[rowLabels[j]].append(ydata[j]);
+    }
+
+    for(const auto& entry : xByLabel)
+    {
+        const QString& label = entry.first;
+        const QColor color = labelColors.at(label);
+
+        QCPGraph* overlay = ui->plotWidget->addGraph(ui->plotWidget->xAxis, valueAxis);
+        overlay->setData(entry.second, yByLabel[label], /*alreadySorted*/ false);
+        overlay->setLineStyle(QCPGraph::lsNone);
+        overlay->setScatterStyle(QCPScatterStyle(static_cast<QCPScatterStyle::ScatterShape>(shape), color, color, 5));
+        overlay->setPen(QPen(color));
+        overlay->setName(label);
+        // Purely decorative: not selectable, so the underlying plottable remains the single source
+        // of truth for point/row selection. Keep the legend entry only when requested.
+        overlay->setSelectable(QCP::stNone);
+        if(!addToLegend)
+            overlay->removeFromLegend();
     }
 }
 

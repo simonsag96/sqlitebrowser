@@ -2681,6 +2681,9 @@ static void loadBrowseDataTableSettings(BrowseDataTableSettings& settings, sqlb:
     settings.showRowid = xml.attributes().value("show_row_id").toInt();
     settings.encoding = xml.attributes().value("encoding").toString();
     settings.plotXAxis = xml.attributes().value("plot_x_axis").toString();
+    settings.plotColorColumn = xml.attributes().value("plot_color_axis").toString();
+    if(xml.attributes().hasAttribute("plot_color_gradient"))
+        settings.plotColorGradient = xml.attributes().value("plot_color_gradient").toInt();
     settings.unlockViewPk = xml.attributes().value("unlock_view_pk").toString();
     if(xml.attributes().hasAttribute("freeze_columns"))
         settings.frozenColumns = xml.attributes().value("freeze_columns").toUInt();
@@ -3095,6 +3098,8 @@ static void saveBrowseDataTableSettings(const BrowseDataTableSettings& object, s
     xml.writeAttribute("show_row_id", QString::number(object.showRowid));
     xml.writeAttribute("encoding", object.encoding);
     xml.writeAttribute("plot_x_axis", object.plotXAxis);
+    xml.writeAttribute("plot_color_axis", object.plotColorColumn);
+    xml.writeAttribute("plot_color_gradient", QString::number(object.plotColorGradient));
     xml.writeAttribute("unlock_view_pk", object.unlockViewPk);
     xml.writeAttribute("freeze_columns", QString::number(object.frozenColumns));
 

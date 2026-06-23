@@ -37,6 +37,8 @@ struct BrowseDataTableSettings
     QString encoding;
     QString plotXAxis;
     std::vector<std::map<QString, PlotDock::PlotSettings>> plotYAxes;
+    QString plotColorColumn;
+    int plotColorGradient;
     QString unlockViewPk;
     std::map<int, bool> hiddenColumns;
     std::vector<QString> globalFilters;
@@ -45,6 +47,7 @@ struct BrowseDataTableSettings
     BrowseDataTableSettings() :
         showRowid(false),
         plotYAxes({std::map<QString, PlotDock::PlotSettings>(), std::map<QString, PlotDock::PlotSettings>()}),
+        plotColorGradient(-1),
         unlockViewPk("_rowid_"),
         frozenColumns(0)
     {
