@@ -27,6 +27,7 @@
 #include <QLocale>
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <set>
 
@@ -53,6 +54,24 @@ static QCPColorGradient gradientFromIndex(int index)
     return gradient;
 }
 
+// Linear-interpolation percentile (type 7, the NumPy/Excel default) of an already-sorted vector.
+static double sortedPercentile(const QVector<double>& sorted, double p)
+{
+    if(sorted.isEmpty())
+        return 0.0;
+    if(sorted.size() == 1)
+        return sorted.first();
+
+    const double pos = p * (sorted.size() - 1);
+    const int lo = static_cast<int>(std::floor(pos));
+    const int hi = static_cast<int>(std::ceil(pos));
+    if(lo == hi)
+        return sorted[lo];
+
+    const double frac = pos - lo;
+    return sorted[lo] * (1.0 - frac) + sorted[hi] * frac;
+}
+
 PlotDock::PlotDock(QWidget* parent)
     : QDialog(parent),
       ui(new Ui::PlotDock),
@@ -74,11 +93,20 @@ PlotDock::PlotDock(QWidget* parent)
     ui->splitterForPlot->restoreState(Settings::getValue("PlotDock", "splitterSize").toByteArray());
     ui->comboLineType->setCurrentIndex(Settings::getValue("PlotDock", "lineType").toInt());
     ui->comboPointShape->setCurrentIndex(Settings::getValue("PlotDock", "pointShape").toInt());
-    // Restore the gradient without emitting currentIndexChanged: the slot would call updatePlot()
+    // Restore these without emitting their changed signals: the slots would call updatePlot()
     // before yAxes is initialised at the end of this constructor, which would crash.
     ui->comboColorGradient->blockSignals(true);
     ui->comboColorGradient->setCurrentIndex(Settings::getValue("PlotDock", "colorGradient").toInt());
     ui->comboColorGradient->blockSignals(false);
+    ui->comboPlotType->blockSignals(true);
+    ui->comboPlotType->setCurrentIndex(Settings::getValue("PlotDock", "plotType").toInt());
+    ui->comboPlotType->blockSignals(false);
+    ui->spinHistogramBins->blockSignals(true);
+    ui->spinHistogramBins->setValue(Settings::getValue("PlotDock", "histogramBins").toInt());
+    ui->spinHistogramBins->blockSignals(false);
+
+    // Show only the controls relevant for the restored plot type
+    updatePlotControlsVisibility(ui->comboPlotType->currentIndex());
 
     // Connect signals
     connect(ui->plotWidget, &QCustomPlot::selectionChangedByUser, this, &PlotDock::selectionChanged);
@@ -166,6 +194,8 @@ PlotDock::~PlotDock()
     Settings::setValue("PlotDock", "lineType", ui->comboLineType->currentIndex());
     Settings::setValue("PlotDock", "pointShape", ui->comboPointShape->currentIndex());
     Settings::setValue("PlotDock", "colorGradient", ui->comboColorGradient->currentIndex());
+    Settings::setValue("PlotDock", "plotType", ui->comboPlotType->currentIndex());
+    Settings::setValue("PlotDock", "histogramBins", ui->spinHistogramBins->value());
 
     // Finally, delete all widgets
     delete ui;
@@ -367,7 +397,17 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
     yAxes[0]->setLabel(QString());
     yAxes[1]->setLabel(QString());
 
-    if(xitem)
+    const int plotType = ui->comboPlotType->currentIndex();
+
+    if(plotType == PlotTypeHistogram)
+    {
+        drawHistogram();
+    }
+    else if(plotType == PlotTypeBoxPlot)
+    {
+        drawBoxPlot();
+    }
+    else if(xitem)
     {
         // regain the model column index and the datatype
         // right now datatype is only important for X axis (Y is always numeric)
@@ -760,7 +800,10 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
         m_colorScale->setMarginGroup(QCP::msTop | QCP::msBottom, m_colorScaleMarginGroup);
     }
 
-    adjustBars();
+    // adjustBars() groups/sizes QCPBars and would override the histogram's own bin widths, so only
+    // run it for the X/Y plot (where bar charts are part of that mode).
+    if(plotType == PlotTypeXY)
+        adjustBars();
     adjustAxisFormat();
     ui->plotWidget->replot();
 
@@ -1131,6 +1174,295 @@ void PlotDock::drawCategoricalPoints(QCPAxis* valueAxis, const QVector<double>& 
         if(!addToLegend)
             overlay->removeFromLegend();
     }
+}
+
+void PlotDock::drawHistogram()
+{
+    SqliteTableModel* model = m_currentPlotModel;
+    if(!model)
+        return;
+
+    // Internal id of the virtual 'Row #' column (see updatePlot)
+    const int RowNumId = -1;
+
+    // A histogram shows a single distribution, so use the first checked numeric (Y) column.
+    int column = RowNumId;
+    QColor color;
+    QString name;   // stays null until a series is found
+    for(int i = 0; i < ui->treePlotColumns->topLevelItemCount() && name.isNull(); ++i)
+    {
+        QTreeWidgetItem* item = ui->treePlotColumns->topLevelItem(i);
+        if(item->data(PlotColumnType, Qt::UserRole).toUInt() != QVariant::Double)
+            continue;
+        const bool y1 = item->checkState(PlotColumnY1) == Qt::Checked;
+        const bool y2 = item->checkState(PlotColumnY2) == Qt::Checked;
+        if(y1 || y2)
+        {
+            column = item->data(PlotColumnField, Qt::UserRole).toInt();
+            color = item->background(y1 ? PlotColumnY1 : PlotColumnY2).color();
+            name = item->text(PlotColumnField);
+        }
+    }
+    if(name.isNull())
+        return;
+    if(!color.isValid())
+        color = m_graphPalette.nextSerialColor();
+
+    // Gather the (non-null) numeric values
+    QVector<double> values;
+    const int nrows = model->rowCount();
+    values.reserve(nrows);
+    for(int j = 0; j < nrows; ++j)
+    {
+        const QVariant v = (column == RowNumId) ? QVariant(j+1) : model->data(model->index(j, column), Qt::EditRole);
+        if(v.isNull())
+            continue;
+        bool ok = false;
+        const double d = v.toDouble(&ok);
+        if(ok && !qIsNaN(d))
+            values.append(d);
+    }
+    if(values.isEmpty())
+        return;
+
+    const double minV = *std::min_element(values.constBegin(), values.constEnd());
+    const double maxV = *std::max_element(values.constBegin(), values.constEnd());
+
+    // Number of bins: the spin box value, or Sturges' rule when set to 0 (Auto)
+    int bins = ui->spinHistogramBins->value();
+    if(bins <= 0)
+        bins = static_cast<int>(std::ceil(std::log2(static_cast<double>(values.size())) + 1.0));
+    bins = std::max(1, std::min(bins, 1000));
+
+    const double span = maxV - minV;
+    const double binWidth = (span > 0) ? span / bins : 1.0;
+
+    QVector<double> binCenters(bins), counts(bins, 0.0);
+    for(int b = 0; b < bins; ++b)
+        binCenters[b] = minV + (b + 0.5) * binWidth;
+    for(double d : values)
+    {
+        int idx = (span > 0) ? static_cast<int>((d - minV) / binWidth) : 0;
+        idx = std::max(0, std::min(idx, bins - 1));   // include the maximum value in the last bin
+        counts[idx] += 1.0;
+    }
+
+    QCPBars* bars = new QCPBars(ui->plotWidget->xAxis, yAxes[0]);
+    bars->setData(binCenters, counts, /*alreadySorted*/ true);
+    bars->setWidth(binWidth * 0.9);
+    bars->setBrush(color);
+    bars->setPen(QPen(color.darker(150)));
+    bars->setName(name);
+    bars->setSelectable(QCP::stNone);
+
+    // Axes: numeric value on X, count on Y
+    m_xtype = QVariant::Double;
+    ui->plotWidget->xAxis->setTickLabelRotation(0);
+    ui->plotWidget->xAxis->setTicker(QSharedPointer<QCPAxisTicker>(new QCPAxisTicker));
+    ui->plotWidget->xAxis->setLabel(name);
+    yAxes[0]->setLabel(tr("Count"));
+    yAxes[0]->setVisible(true);
+    yAxes[0]->setTickLabels(true);
+    yAxes[1]->setVisible(false);
+    yAxes[1]->setTickLabels(false);
+
+    ui->plotWidget->rescaleAxes();
+    yAxes[0]->setRangeLower(0);   // counts start at zero
+    ui->plotWidget->legend->setVisible(m_showLegend);
+    ui->plotWidget->legend->setBrush(QColor(255, 255, 255, 150));
+}
+
+void PlotDock::drawBoxPlot()
+{
+    SqliteTableModel* model = m_currentPlotModel;
+    if(!model)
+        return;
+
+    // Internal id of the virtual 'Row #' column (see updatePlot)
+    const int RowNumId = -1;
+
+    // A box plot groups a numeric value by a category, so the X column must be a label column.
+    QTreeWidgetItem* xitem = checkedItem(PlotColumnX);
+    if(!xitem || xitem->data(PlotColumnType, Qt::UserRole).toUInt() != QVariant::String)
+        return;
+    const int xcol = xitem->data(PlotColumnField, Qt::UserRole).toInt();
+
+    // Collect the checked numeric (Y) columns; each becomes one box series
+    struct YSeries { int col; QColor color; QString name; };
+    std::vector<YSeries> series;
+    for(int i = 0; i < ui->treePlotColumns->topLevelItemCount(); ++i)
+    {
+        QTreeWidgetItem* item = ui->treePlotColumns->topLevelItem(i);
+        if(item->data(PlotColumnType, Qt::UserRole).toUInt() != QVariant::Double)
+            continue;
+        const bool y1 = item->checkState(PlotColumnY1) == Qt::Checked;
+        const bool y2 = item->checkState(PlotColumnY2) == Qt::Checked;
+        if(!y1 && !y2)
+            continue;
+        YSeries s;
+        s.col = item->data(PlotColumnField, Qt::UserRole).toInt();
+        s.color = item->background(y1 ? PlotColumnY1 : PlotColumnY2).color();
+        if(!s.color.isValid())
+            s.color = m_graphPalette.nextSerialColor();
+        s.name = item->text(PlotColumnField);
+        series.push_back(s);
+    }
+    if(series.empty())
+        return;
+
+    // Bucket the value(s) by category, in first-appearance order. Limit the number of categories so
+    // the plot stays readable and bounded.
+    const int maxCategories = 100;
+    std::vector<QString> categories;
+    std::map<QString, int> categoryIndex;
+    std::vector<std::vector<QVector<double>>> values(series.size());   // values[series][category]
+
+    const int nrows = model->rowCount();
+    for(int j = 0; j < nrows; ++j)
+    {
+        const QVariant xv = model->data(model->index(j, xcol), Qt::EditRole);
+        if(xv.isNull())
+            continue;
+        const QString cat = xv.toString();
+
+        int ci;
+        auto it = categoryIndex.find(cat);
+        if(it == categoryIndex.end())
+        {
+            if(static_cast<int>(categories.size()) >= maxCategories)
+                continue;
+            ci = static_cast<int>(categories.size());
+            categoryIndex[cat] = ci;
+            categories.push_back(cat);
+            for(auto& seriesValues : values)
+                seriesValues.emplace_back();
+        } else {
+            ci = it->second;
+        }
+
+        for(size_t s = 0; s < series.size(); ++s)
+        {
+            const QVariant yv = (series[s].col == RowNumId) ? QVariant(j+1) : model->data(model->index(j, series[s].col), Qt::EditRole);
+            if(yv.isNull())
+                continue;
+            bool ok = false;
+            const double d = yv.toDouble(&ok);
+            if(ok && !qIsNaN(d))
+                values[s][ci].append(d);
+        }
+    }
+    if(categories.empty())
+        return;
+
+    // With several value columns the boxes are grouped side by side inside each category slot.
+    const int S = static_cast<int>(series.size());
+    const double groupWidth = 0.8;
+    const double boxWidth = groupWidth / S;
+
+    for(int s = 0; s < S; ++s)
+    {
+        QCPStatisticalBox* box = new QCPStatisticalBox(ui->plotWidget->xAxis, yAxes[0]);
+        box->setWidth(boxWidth * 0.9);
+        box->setBrush(series[static_cast<size_t>(s)].color);
+        box->setPen(QPen(series[static_cast<size_t>(s)].color.darker(150)));
+        box->setMedianPen(QPen(Qt::black, 2));
+        box->setName(series[static_cast<size_t>(s)].name);
+        box->setSelectable(QCP::stNone);
+        if(S == 1)
+            box->removeFromLegend();
+
+        for(int ci = 0; ci < static_cast<int>(categories.size()); ++ci)
+        {
+            QVector<double> v = values[static_cast<size_t>(s)][static_cast<size_t>(ci)];
+            if(v.isEmpty())
+                continue;
+            std::sort(v.begin(), v.end());
+
+            const double q1 = sortedPercentile(v, 0.25);
+            const double med = sortedPercentile(v, 0.50);
+            const double q3 = sortedPercentile(v, 0.75);
+            const double iqr = q3 - q1;
+            const double lowerFence = q1 - 1.5 * iqr;
+            const double upperFence = q3 + 1.5 * iqr;
+
+            // Whiskers extend to the most extreme values still within the fences; the rest are outliers.
+            QVector<double> outliers;
+            double whiskerMin = q1, whiskerMax = q3;
+            bool haveWhisker = false;
+            for(double d : v)
+            {
+                if(d < lowerFence || d > upperFence)
+                {
+                    outliers.append(d);
+                } else {
+                    if(!haveWhisker)
+                    {
+                        whiskerMin = d;
+                        haveWhisker = true;
+                    }
+                    whiskerMax = d;
+                }
+            }
+
+            // Centre single series on integer keys; offset grouped series around them.
+            const double key = (ci + 1) + (S > 1 ? (s - (S - 1) / 2.0) * boxWidth : 0.0);
+            box->addData(key, whiskerMin, q1, med, q3, whiskerMax, outliers);
+        }
+    }
+
+    // X axis: one labelled tick per category, centred on its group
+    QSharedPointer<QCPAxisTickerText> ticker(new QCPAxisTickerText);
+    for(int ci = 0; ci < static_cast<int>(categories.size()); ++ci)
+        ticker->addTick(ci + 1, categories[static_cast<size_t>(ci)]);
+    ui->plotWidget->xAxis->setTicker(ticker);
+    ui->plotWidget->xAxis->setSubTicks(false);
+    ui->plotWidget->xAxis->setTickLabelRotation(60);
+    ui->plotWidget->xAxis->setLabel(xitem->text(PlotColumnField));
+
+    m_xtype = QVariant::String;
+    yAxes[0]->setLabel(S == 1 ? series[0].name : tr("Value"));
+    yAxes[0]->setVisible(true);
+    yAxes[0]->setTickLabels(true);
+    yAxes[1]->setVisible(false);
+    yAxes[1]->setTickLabels(false);
+
+    ui->plotWidget->rescaleAxes();
+    ui->plotWidget->xAxis->setRange(0.5, categories.size() + 0.5);
+    ui->plotWidget->legend->setVisible(m_showLegend || S > 1);
+    ui->plotWidget->legend->setBrush(QColor(255, 255, 255, 150));
+}
+
+void PlotDock::plotTypeChanged(int index)
+{
+    Settings::setValue("PlotDock", "plotType", index);
+    updatePlotControlsVisibility(index);
+    updatePlot(m_currentPlotModel, m_currentTableSettings, false);
+}
+
+void PlotDock::histogramBinsChanged(int bins)
+{
+    Settings::setValue("PlotDock", "histogramBins", bins);
+    // Only the histogram cares about the bin count
+    if(ui->comboPlotType->currentIndex() == PlotTypeHistogram)
+        updatePlot(m_currentPlotModel, m_currentTableSettings, false);
+}
+
+void PlotDock::updatePlotControlsVisibility(int plotType)
+{
+    const bool isXY = (plotType == PlotTypeXY);
+    const bool isHistogram = (plotType == PlotTypeHistogram);
+
+    // Line/point/colour controls only apply to the X/Y plot
+    ui->label_2->setVisible(isXY);
+    ui->comboLineType->setVisible(isXY);
+    ui->label_3->setVisible(isXY);
+    ui->comboPointShape->setVisible(isXY);
+    ui->labelColorScale->setVisible(isXY);
+    ui->comboColorGradient->setVisible(isXY);
+
+    // Bin count only applies to the histogram
+    ui->labelBins->setVisible(isHistogram);
+    ui->spinHistogramBins->setVisible(isHistogram);
 }
 
 QVariant::Type PlotDock::guessDataType(SqliteTableModel* model, int column) const

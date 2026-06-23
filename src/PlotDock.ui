@@ -106,6 +106,38 @@ Select the axes or axes labels to drag and zoom only in that orientation.</strin
    <item>
     <layout class="QHBoxLayout" name="horizontalLayout">
      <item>
+      <widget class="QLabel" name="labelPlotType">
+       <property name="text">
+        <string>Plot type:</string>
+       </property>
+       <property name="buddy">
+        <cstring>comboPlotType</cstring>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="comboPlotType">
+       <property name="toolTip">
+        <string>&lt;html&gt;&lt;head/&gt;&lt;body&gt;&lt;p&gt;Choose what kind of plot to draw:&lt;/p&gt;&lt;ul&gt;&lt;li&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;X/Y plot&lt;/span&gt;: the standard line/curve/bar plot using the X and Y columns&lt;/li&gt;&lt;li&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;Histogram&lt;/span&gt;: the distribution of a single numeric (Y) column&lt;/li&gt;&lt;li&gt;&lt;span style=&quot; font-weight:600;&quot;&gt;Box plot&lt;/span&gt;: a box-and-whisker summary of a numeric (Y) column grouped by a label (X) column&lt;/li&gt;&lt;/ul&gt;&lt;/body&gt;&lt;/html&gt;</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>X/Y plot</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Histogram</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Box plot</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
       <widget class="QLabel" name="label_2">
        <property name="text">
         <string>Line type:</string>
@@ -373,6 +405,32 @@ Select the axes or axes labels to drag and zoom only in that orientation.</strin
          </widget>
         </item>
         <item>
+         <widget class="QLabel" name="labelBins">
+          <property name="text">
+           <string>Bins:</string>
+          </property>
+          <property name="buddy">
+           <cstring>spinHistogramBins</cstring>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSpinBox" name="spinHistogramBins">
+          <property name="toolTip">
+           <string>Number of histogram bins (0 = automatic)</string>
+          </property>
+          <property name="specialValueText">
+           <string>Auto</string>
+          </property>
+          <property name="maximum">
+           <number>1000</number>
+          </property>
+          <property name="value">
+           <number>0</number>
+          </property>
+         </widget>
+        </item>
+        <item>
          <spacer name="horizontalSpacer_4">
           <property name="orientation">
            <enum>Qt::Horizontal</enum>
@@ -556,6 +614,38 @@ Select the axes or axes labels to drag and zoom only in that orientation.</strin
     </hint>
    </hints>
   </connection>
+  <connection>
+   <sender>comboPlotType</sender>
+   <signal>currentIndexChanged(int)</signal>
+   <receiver>PlotDock</receiver>
+   <slot>plotTypeChanged(int)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+   </hints>
+  </connection>
+  <connection>
+   <sender>spinHistogramBins</sender>
+   <signal>valueChanged(int)</signal>
+   <receiver>PlotDock</receiver>
+   <slot>histogramBinsChanged(int)</slot>
+   <hints>
+    <hint type="sourcelabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+    <hint type="destinationlabel">
+     <x>-1</x>
+     <y>-1</y>
+    </hint>
+   </hints>
+  </connection>
  </connections>
  <slots>
   <slot>fetchAllData()</slot>
@@ -565,5 +655,7 @@ Select the axes or axes labels to drag and zoom only in that orientation.</strin
   <slot>lineTypeChanged(int)</slot>
   <slot>pointShapeChanged(int)</slot>
   <slot>colorGradientChanged(int)</slot>
+  <slot>plotTypeChanged(int)</slot>
+  <slot>histogramBinsChanged(int)</slot>
  </slots>
 </ui>

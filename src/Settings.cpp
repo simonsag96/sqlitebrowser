@@ -440,6 +440,14 @@ QVariant Settings::getDefaultValue(const std::string& group, const std::string& 
         // QCPColorGradient::gpThermal (index in the comboColorGradient list)
         if(name == "colorGradient")
             return 7;
+
+        // Plot type: 0 = X/Y plot (PlotDock::PlotTypeXY)
+        if(name == "plotType")
+            return 0;
+
+        // Histogram bin count: 0 = automatic
+        if(name == "histogramBins")
+            return 0;
     }
 
 

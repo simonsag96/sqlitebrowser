@@ -98,6 +98,14 @@ private:
         PlotColumnType = 5,
     };
 
+    // Must match the item order of the comboPlotType combo box in PlotDock.ui
+    enum PlotType
+    {
+        PlotTypeXY = 0,
+        PlotTypeHistogram = 1,
+        PlotTypeBoxPlot = 2,
+    };
+
     Ui::PlotDock* ui;
 
     SqliteTableModel* m_currentPlotModel;
@@ -164,6 +172,27 @@ private:
                                const QVector<QString>& rowLabels, const std::map<QString, QColor>& labelColors,
                                int shape, bool addToLegend);
 
+    /*!
+     * \brief Draw a histogram of a single numeric (Y) column.
+     *
+     * Uses the first checked numeric Y column. The number of bins is taken from the Bins spin box,
+     * or computed automatically (Sturges' rule) when that is set to 0/Auto.
+     */
+    void drawHistogram();
+
+    /*!
+     * \brief Draw a box-and-whisker plot of the numeric (Y) column(s) grouped by the label (X) column.
+     *
+     * Requires the X column to be a label/string column and at least one numeric Y column. One box is
+     * drawn per distinct X value; with several Y columns the boxes are grouped side by side per category.
+     */
+    void drawBoxPlot();
+
+    /*!
+     * \brief Show only the toolbar controls relevant for the given plot type.
+     */
+    void updatePlotControlsVisibility(int plotType);
+
 private slots:
     void columnItemChanged(QTreeWidgetItem* item, int column);
     void columnItemDoubleClicked(QTreeWidgetItem* item, int column);
@@ -171,6 +200,8 @@ private slots:
     void lineTypeChanged(int index);
     void pointShapeChanged(int index);
     void colorGradientChanged(int index);
+    void plotTypeChanged(int index);
+    void histogramBinsChanged(int bins);
     void selectionChanged();
     void mousePress();
     void mouseWheel();
