@@ -167,10 +167,12 @@ private:
      * \param labelColors mapping of each distinct label to its colour
      * \param shape the scatter shape to use for the points
      * \param addToLegend whether the created overlay graphs should appear in the legend
+     * \param drawLine when true, the connecting line is also coloured per label: each segment takes
+     *        the colour of its earlier endpoint, drawn as runs covering the base line
      */
     void drawCategoricalPoints(QCPAxis* valueAxis, const QVector<double>& xdata, const QVector<double>& ydata,
                                const QVector<QString>& rowLabels, const std::map<QString, QColor>& labelColors,
-                               int shape, bool addToLegend);
+                               int shape, bool addToLegend, bool drawLine);
 
     /*!
      * \brief Draw a histogram of a single numeric (Y) column.

@@ -711,6 +711,13 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                     // while these opaque coloured points sit exactly on top of them.
                     if(colorActive)
                     {
+                        // The connecting line is only recoloured when it is a straight line: a sorted
+                        // graph with the "Line" style, or any non-empty style on a curve (curves only
+                        // ever draw straight segments). Stepped/impulse lines keep the base colour.
+                        const int lineIdx = ui->comboLineType->currentIndex();
+                        const bool drawLine = categoricalColor &&
+                                              (isSorted ? (lineIdx == QCPGraph::lsLine) : (lineIdx != QCPGraph::lsNone));
+
                         for(size_t y_ind = 0; y_ind < 2; y_ind++)
                         {
                             if(!yItemBool[y_ind])
@@ -719,7 +726,7 @@ void PlotDock::updatePlot(SqliteTableModel* model, BrowseDataTableSettings* sett
                             {
                                 // Only the first drawn series populates the legend, so each label
                                 // appears exactly once even with two y-axes.
-                                drawCategoricalPoints(yAxes[y_ind], xdata, ydata[y_ind], rowLabels, labelColors, shapeIdx, !categoricalLegendDone);
+                                drawCategoricalPoints(yAxes[y_ind], xdata, ydata[y_ind], rowLabels, labelColors, shapeIdx, !categoricalLegendDone, drawLine);
                                 categoricalLegendDone = true;
                             } else {
                                 drawColorScaledPoints(yAxes[y_ind], xdata, ydata[y_ind], colorData, colorRange, shapeIdx);
@@ -1137,13 +1144,73 @@ void PlotDock::drawColorScaledPoints(QCPAxis* valueAxis, const QVector<double>& 
 
 void PlotDock::drawCategoricalPoints(QCPAxis* valueAxis, const QVector<double>& xdata, const QVector<double>& ydata,
                                      const QVector<QString>& rowLabels, const std::map<QString, QColor>& labelColors,
-                                     int shape, bool addToLegend)
+                                     int shape, bool addToLegend, bool drawLine)
 {
+    const int n = std::min(rowLabels.size(), std::min(xdata.size(), ydata.size()));
+
+    // Recolour the connecting line first (so the coloured points end up on top of it). The line is
+    // split into runs of consecutive segments that share a colour; each segment is coloured by its
+    // earlier endpoint's label, so the colour changes as the line passes through the points. A point
+    // without a coordinate or a colour breaks the run, matching the gaps in the base line.
+    if(drawLine)
+    {
+        QColor runColor;
+        QVector<double> tRun, xRun, yRun;
+
+        auto flushRun = [&]()
+        {
+            if(xRun.size() >= 2)
+            {
+                QCPCurve* line = new QCPCurve(ui->plotWidget->xAxis, valueAxis);
+                line->setData(tRun, xRun, yRun, /*alreadySorted*/ true);
+                line->setLineStyle(QCPCurve::lsLine);
+                line->setScatterStyle(QCPScatterStyle::ssNone);
+                line->setPen(QPen(runColor));
+                line->setSelectable(QCP::stNone);
+                line->removeFromLegend();
+            }
+            tRun.clear();
+            xRun.clear();
+            yRun.clear();
+        };
+
+        for(int s = 0; s + 1 < n; ++s)
+        {
+            const bool validSegment =
+                !rowLabels[s].isNull() &&
+                !qIsNaN(xdata[s]) && !qIsNaN(ydata[s]) &&
+                !qIsNaN(xdata[s+1]) && !qIsNaN(ydata[s+1]) &&
+                labelColors.find(rowLabels[s]) != labelColors.end();
+            if(!validSegment)
+            {
+                flushRun();
+                continue;
+            }
+
+            const QColor segColor = labelColors.at(rowLabels[s]);
+            if(!xRun.isEmpty() && segColor == runColor)
+            {
+                // Extend the current run with the new endpoint
+                tRun.append(s+1);
+                xRun.append(xdata[s+1]);
+                yRun.append(ydata[s+1]);
+            } else {
+                // Start a new run; it shares its first point with the previous run, keeping the line
+                // continuous while changing colour exactly at that point.
+                flushRun();
+                runColor = segColor;
+                tRun  << s   << s+1;
+                xRun  << xdata[s]   << xdata[s+1];
+                yRun  << ydata[s]   << ydata[s+1];
+            }
+        }
+        flushRun();
+    }
+
     // Group the points by their label, so each distinct label becomes a single overlay graph.
     std::map<QString, QVector<double>> xByLabel;
     std::map<QString, QVector<double>> yByLabel;
 
-    const int n = std::min(rowLabels.size(), std::min(xdata.size(), ydata.size()));
     for(int j = 0; j < n; ++j)
     {
         // Rows without a label (NULL) or coordinates are left to the underlying plottable.
